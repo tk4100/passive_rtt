@@ -24,13 +24,19 @@
 
 //----------------------------------------------
 
-/* Ethernet header */
-struct sniff_ethernet {
-        u_char  ether_dhost[ETHER_ADDR_LEN];    /* destination host address */
-        u_char  ether_shost[ETHER_ADDR_LEN];    /* source host address */
-        u_short ether_type;                     /* IP? ARP? RARP? etc */
-};
+struct tcpConnection
+	{
+	uint32_t tstamp;
 
+
+	uint32_t src;
+	uint32_t dst;
+
+	uint16_t sport;
+	uint16_t dport;
+	};
+
+//----------------------------------------------
 
 void got_packet(u_char *args, const struct pcap_pkthdr *header, const u_char *packet)
 	{
@@ -38,7 +44,7 @@ void got_packet(u_char *args, const struct pcap_pkthdr *header, const u_char *pa
 	static int count = 1;                   /* packet counter */
 	
 	/* declare pointers to packet headers */
-	const struct sniff_ethernet *ethernet;  /* The ethernet header [1] */
+	const struct ether_header *ethernet;  /* The ethernet header [1] */
 	const struct ip *ip;              /* The IP header */
 	const struct tcphdr *tcp;            /* The TCP header */
 	const char *payload;                    /* Packet payload */
@@ -51,7 +57,7 @@ void got_packet(u_char *args, const struct pcap_pkthdr *header, const u_char *pa
 	count++;
 	
 	/* define ethernet header */
-	ethernet = (struct sniff_ethernet*)(packet);
+	ethernet = (struct ether_header*)(packet);
 	
 	/* define/compute ip header offset */
 	ip = (struct ip*)(packet + SIZE_ETHERNET);
@@ -74,14 +80,13 @@ void got_packet(u_char *args, const struct pcap_pkthdr *header, const u_char *pa
 			uint8_t *kind;
 			uint8_t *len;
 
+			// yes we're skipping any packets that don't have their *first* option
+			// set to timestamps.  whatever, we're going for an average value
+			// and there is plenty of traffic to sample.
 			kind = (uint8_t*)(packet + SIZE_ETHERNET + size_ip + sizeof(struct tcphdr));
 
 			while(*kind == TCPOPT_NOP)
 				kind += TCPOLEN_NOP;
-
-			// yes we're skipping any packets that don't have their *first* option
-			// set to timestamps.  whatever, we're going for an average value
-			// and there is plenty of traffic to sample.
 			if(*kind == TCPOPT_TIMESTAMP)
 				{
 				uint32_t *TSVal;
@@ -91,6 +96,8 @@ void got_packet(u_char *args, const struct pcap_pkthdr *header, const u_char *pa
 				TSecr = (uint32_t*)(kind + 2 + 4);
 
 				printf("%d->%d, TSVal: %u, TSecr: %u\n", tcp->th_sport, tcp->th_dport, *TSVal, *TSecr);
+				// so now we need to keep a table of current timestamps for local senders, and compare
+				// incoming TSecrs against it.
 				}
 			}
 		}
