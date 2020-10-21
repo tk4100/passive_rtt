@@ -22,39 +22,85 @@
 /* Ethernet addresses are 6 bytes */
 #define ETHER_ADDR_LEN	6
 
+// table size
+#define RTT_TABLE_SIZE 64
+
 //----------------------------------------------
 
-struct tcpConnection
+struct rtt_measure
 	{
-	uint32_t tstamp;
+	uint32_t tsval;
 
+	uint64_t rtt_us;
 
-	uint32_t src;
-	uint32_t dst;
-
-	uint16_t sport;
-	uint16_t dport;
+	struct timespec out_time;
+	struct timespec in_time;
 	};
 
+
 //----------------------------------------------
+
+struct rtt_measure rtt_table[RTT_TABLE_SIZE];
+uint32_t rtt_table_cursor;
+
+
+
+
+uint32_t unknownTSVal(uint32_t TSVal)
+	{
+	uint32_t i = 0;
+	while(i<RTT_TABLE_SIZE)
+		{
+		if(rtt_table[i].tsval == TSVal)
+			return(0);
+		i++;
+		}
+	return(1);
+	}
+
+uint32_t knownTSVal(uint32_t TSVal)
+	{
+	if(unknownTSVal(TSVal))
+		return(0);
+	else
+		return(1);
+	}
+
+void completeRTT(uint32_t TSVal, struct timespec *now)
+	{
+	uint32_t i = 0;
+	uint64_t outtime = 0;
+	uint64_t intime = 0;
+
+	while(i<RTT_TABLE_SIZE)
+		{
+		if(rtt_table[i].tsval == TSVal)
+			{
+			rtt_table[i].in_time.tv_sec = now->tv_sec;
+			rtt_table[i].in_time.tv_nsec = now->tv_nsec;
+
+			outtime = (rtt_table[i].out_time.tv_sec * 1000 * 1000) + (rtt_table[i].out_time.tv_nsec / 1000);
+			intime = (now->tv_sec * 1000 * 1000) + (now->tv_nsec / 1000);
+
+			rtt_table[i].rtt_us = intime - outtime;
+			}
+		i++;
+		}
+	}
 
 void got_packet(u_char *args, const struct pcap_pkthdr *header, const u_char *packet)
 	{
+	struct timespec now;
+	clock_gettime(CLOCK_MONOTONIC, &now);
 
-	static int count = 1;                   /* packet counter */
-	
-	/* declare pointers to packet headers */
-	const struct ether_header *ethernet;  /* The ethernet header [1] */
-	const struct ip *ip;              /* The IP header */
-	const struct tcphdr *tcp;            /* The TCP header */
-	const char *payload;                    /* Packet payload */
+	const struct ether_header *ethernet;
+	const struct ip *ip;
+	const struct tcphdr *tcp;
+	const char *payload;
 
 	int size_ip;
 	int size_tcp;
 	int size_payload;
-	
-	//printf("\nPacket number %d:\n", count);
-	count++;
 	
 	/* define ethernet header */
 	ethernet = (struct ether_header*)(packet);
@@ -87,6 +133,7 @@ void got_packet(u_char *args, const struct pcap_pkthdr *header, const u_char *pa
 
 			while(*kind == TCPOPT_NOP)
 				kind += TCPOLEN_NOP;
+
 			if(*kind == TCPOPT_TIMESTAMP)
 				{
 				uint32_t *TSVal;
@@ -95,9 +142,22 @@ void got_packet(u_char *args, const struct pcap_pkthdr *header, const u_char *pa
 				TSVal = (uint32_t*)(kind + 2);
 				TSecr = (uint32_t*)(kind + 2 + 4);
 
-				printf("%d->%d, TSVal: %u, TSecr: %u\n", tcp->th_sport, tcp->th_dport, *TSVal, *TSecr);
-				// so now we need to keep a table of current timestamps for local senders, and compare
-				// incoming TSecrs against it.
+				if(unknownTSVal(*TSVal))
+					{
+					rtt_table[rtt_table_cursor].tsval = *TSVal;
+					rtt_table[rtt_table_cursor].out_time.tv_sec = now.tv_sec;
+					rtt_table[rtt_table_cursor].out_time.tv_nsec = now.tv_nsec;
+
+					if(rtt_table_cursor < RTT_TABLE_SIZE - 1)
+						rtt_table_cursor++;
+					else
+						rtt_table_cursor = 0;
+					}
+
+				if(knownTSVal(*TSecr))
+					completeRTT(*TSecr, &now);
+
+
 				}
 			}
 		}
@@ -147,6 +207,10 @@ int main(int argc, char **argv)
         /// Daemonized!
 	*/
 
+	// clear out our table of things, and reset our cursor
+	memset(&rtt_table, 0, sizeof(rtt_table));
+	rtt_table_cursor = 0;
+
 	char *dev = NULL;			/* capture device name */
 	char errbuf[PCAP_ERRBUF_SIZE];		/* error buffer */
 	pcap_t *handle;				/* packet capture handle */
@@ -155,7 +219,7 @@ int main(int argc, char **argv)
 	struct bpf_program fp;			/* compiled filter program (expression) */
 	bpf_u_int32 mask;			/* subnet mask */
 	bpf_u_int32 net;			/* ip */
-	int num_packets = 40;			/* number of packets to capture */
+	int num_packets = 100;			/* number of packets to capture */
 
 	/* check for capture device name on command-line */
 	if (argc == 2) {
@@ -222,7 +286,14 @@ int main(int argc, char **argv)
 	//graphite_init(host, 2003);
 
 	/* now we can set our callback function */
-	pcap_loop(handle, num_packets, got_packet, NULL);
+	while(1)
+		{
+		pcap_loop(handle, num_packets, got_packet, NULL);
+
+		for(int i=0;i<RTT_TABLE_SIZE;i++)
+			printf("TSVal: %u, Time out: %ld.%.9ld, Time in: %ld.%.9ld, RTT uS: %lu\n", rtt_table[i].tsval, rtt_table[i].out_time.tv_sec, rtt_table[i].out_time.tv_nsec, rtt_table[i].in_time.tv_sec, rtt_table[i].in_time.tv_nsec, rtt_table[i].rtt_us);
+		printf("\n");
+		}
 
 	/* cleanup */
 	pcap_freecode(&fp);
