@@ -33,6 +33,12 @@ struct rtt_measure
 
 	uint64_t rtt_us;
 
+	uint16_t sport_out;
+	uint16_t dport_out;
+
+	uint16_t sport_in;
+	uint16_t dport_in;
+
 	struct timespec out_time;
 	struct timespec in_time;
 	};
@@ -46,27 +52,19 @@ uint32_t rtt_table_cursor;
 
 
 
-uint32_t unknownTSVal(uint32_t TSVal)
+int32_t findTSVal(uint32_t TSVal)
 	{
 	uint32_t i = 0;
 	while(i<RTT_TABLE_SIZE)
 		{
 		if(rtt_table[i].tsval == TSVal)
-			return(0);
+			return(i);
 		i++;
 		}
-	return(1);
+	return(-1);
 	}
 
-uint32_t knownTSVal(uint32_t TSVal)
-	{
-	if(unknownTSVal(TSVal))
-		return(0);
-	else
-		return(1);
-	}
-
-void completeRTT(uint32_t TSVal, struct timespec *now)
+void completeRTT(uint32_t TSVal, struct timespec *now, uint16_t sport, uint16_t dport)
 	{
 	uint32_t i = 0;
 	uint64_t outtime = 0;
@@ -78,6 +76,9 @@ void completeRTT(uint32_t TSVal, struct timespec *now)
 			{
 			rtt_table[i].in_time.tv_sec = now->tv_sec;
 			rtt_table[i].in_time.tv_nsec = now->tv_nsec;
+
+			rtt_table[i].sport_in = sport;
+			rtt_table[i].dport_in = dport;
 
 			outtime = (rtt_table[i].out_time.tv_sec * 1000 * 1000) + (rtt_table[i].out_time.tv_nsec / 1000);
 			intime = (now->tv_sec * 1000 * 1000) + (now->tv_nsec / 1000);
@@ -136,27 +137,41 @@ void got_packet(u_char *args, const struct pcap_pkthdr *header, const u_char *pa
 
 			if(*kind == TCPOPT_TIMESTAMP)
 				{
+				int32_t val_index = -1;
+				int32_t ecr_index = -1;
 				uint32_t *TSVal;
 				uint32_t *TSecr;
 
 				TSVal = (uint32_t*)(kind + 2);
 				TSecr = (uint32_t*)(kind + 2 + 4);
 
-				if(unknownTSVal(*TSVal))
+				val_index = findTSVal(*TSVal);
+				if(val_index == -1)
 					{
 					rtt_table[rtt_table_cursor].tsval = *TSVal;
 					rtt_table[rtt_table_cursor].out_time.tv_sec = now.tv_sec;
 					rtt_table[rtt_table_cursor].out_time.tv_nsec = now.tv_nsec;
+
+					rtt_table[rtt_table_cursor].sport_out = tcp->th_sport;
+					rtt_table[rtt_table_cursor].dport_out = tcp->th_dport;
 
 					if(rtt_table_cursor < RTT_TABLE_SIZE - 1)
 						rtt_table_cursor++;
 					else
 						rtt_table_cursor = 0;
 					}
+				else
+					{
+					rtt_table[val_index].out_time.tv_sec = now.tv_sec;
+					rtt_table[val_index].out_time.tv_nsec = now.tv_nsec;
+					}
+					
 
-				if(knownTSVal(*TSecr))
-					completeRTT(*TSecr, &now);
-
+				ecr_index = findTSVal(*TSecr);
+				//printf("ECR Index: %d\n", ecr_index);
+				if(ecr_index > -1)
+					completeRTT(*TSecr, &now, tcp->th_sport, tcp->th_dport);
+					
 
 				}
 			}
@@ -291,7 +306,7 @@ int main(int argc, char **argv)
 		pcap_loop(handle, num_packets, got_packet, NULL);
 
 		for(int i=0;i<RTT_TABLE_SIZE;i++)
-			printf("TSVal: %u, Time out: %ld.%.9ld, Time in: %ld.%.9ld, RTT uS: %lu\n", rtt_table[i].tsval, rtt_table[i].out_time.tv_sec, rtt_table[i].out_time.tv_nsec, rtt_table[i].in_time.tv_sec, rtt_table[i].in_time.tv_nsec, rtt_table[i].rtt_us);
+			printf("TSVal: %u, Time out: %ld.%.9ld, Time in: %ld.%.9ld, Out Ports: %d:%d, In Ports: %d:%d RTT uS: %lu\n", rtt_table[i].tsval, rtt_table[i].out_time.tv_sec, rtt_table[i].out_time.tv_nsec, rtt_table[i].in_time.tv_sec, rtt_table[i].in_time.tv_nsec, rtt_table[i].sport_out, rtt_table[i].dport_out, rtt_table[i].sport_in, rtt_table[i].dport_in, rtt_table[i].rtt_us);
 		printf("\n");
 		}
 
